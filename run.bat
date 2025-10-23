@@ -20,6 +20,7 @@ echo.
 
 echo [2/3] Starting frontend development server...
 cd frontend
+npm install
 npm run dev
 if %errorlevel% neq 0 (
     echo ERROR: Failed to start frontend development server. Please check Node.js and npm setup.
