@@ -103,6 +103,8 @@ class EdgeProcessor:
         self.face_recognition_url = config.face_recognition_url
         # Identity tracker service URL
         self.identity_tracker_url = config.identity_tracker_url
+        # User service URL
+        self.user_service_url = config.user_service_url
         logger.info("EdgeProcessor initialized", camera_id=config.camera_id, store_zone=config.store_zone)
 
     def _initialize_cameras(self):
@@ -221,6 +223,21 @@ class EdgeProcessor:
             logger.error("Error getting user face data", user_id=user_id, error=str(e))
             return None
 
+    async def auto_register_user(self, face_image_b64: str) -> Optional[str]:
+        """Auto-register a new user with the user service."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self.user_service_url}/auto-register",
+                    json={"face_image_b64": face_image_b64}
+                )
+                response.raise_for_status()
+                data = response.json()
+                return data.get('customer_id')
+        except Exception as e:
+            logger.error("Error auto-registering user", error=str(e))
+            return None
+
     def send_to_kafka(self, event: SightingEvent):
         """Send SightingEvent to Kafka with retries."""
         max_retries = 3
@@ -249,6 +266,92 @@ class EdgeProcessor:
                 if attempt < max_retries - 1:
                     time.sleep(2 ** attempt)  # Exponential backoff
         logger.error("Failed to send event to Kafka after all retries, event lost", camera_id=event.camera_id)
+
+    async def process_frame_for_overlay(self, frame: np.ndarray, camera_id: str = 'device-camera') -> Dict:
+        """Process a single frame and return overlay data for frontend display."""
+        try:
+            overlay_data = {
+                'camera_id': camera_id,
+                'timestamp': datetime.utcnow().isoformat(),
+                'detections': []
+            }
+
+            people_boxes = self.detect_people(frame)
+            logger.debug("People detected for overlay", count=len(people_boxes), camera_id=camera_id)
+
+            for person_box in people_boxes:
+                # Generate object ID
+                object_id = f"{camera_id}_{self.object_id_counter}"
+                self.object_id_counter += 1
+
+                # Crop person region for face detection
+                x1, y1, x2, y2 = person_box
+                person_region = frame[y1:y2, x1:x2]
+
+                if person_region.size == 0:
+                    continue
+
+                faces = self.detect_faces(person_region)
+                logger.debug("Faces detected in person region for overlay", count=len(faces), camera_id=camera_id)
+
+                for face in faces:
+                    cropped_face = self.crop_face(person_region, face)
+                    if cropped_face is not None:
+                        face_crop_b64 = self.encode_image_to_base64(cropped_face)
+                        if face_crop_b64:
+                            # Recognize face using face recognition service
+                            recognition_result = await self.recognize_face(face_crop_b64)
+                            user_id = None
+                            identification_confidence = 0.0
+                            name = None
+                            loyalty_status = None
+
+                            if recognition_result:
+                                user_id = recognition_result.get('id')
+                                identification_confidence = recognition_result.get('confidence', 0.0)
+                                name = recognition_result.get('name')
+                                loyalty_status = recognition_result.get('loyalty_status')
+                                logger.info("Face recognized for overlay", user_id=user_id, confidence=identification_confidence, camera_id=camera_id)
+                            else:
+                                # Face not recognized, auto-register new user
+                                logger.info("Unrecognized face detected for overlay, auto-registering new user", camera_id=camera_id)
+                                user_id = await self.auto_register_user(face_crop_b64)
+                                if user_id:
+                                    identification_confidence = 1.0  # New user, full confidence
+                                    name = f"User {user_id}"
+                                    logger.info("Auto-registration successful for overlay", user_id=user_id, camera_id=camera_id)
+                                else:
+                                    logger.warning("Auto-registration failed for overlay", camera_id=camera_id)
+
+                            # Convert bbox to percentage for frontend overlay
+                            frame_height, frame_width = frame.shape[:2]
+                            bbox_percent = [
+                                (x1 / frame_width) * 100,  # x
+                                (y1 / frame_height) * 100, # y
+                                ((x2 - x1) / frame_width) * 100,  # width
+                                ((y2 - y1) / frame_height) * 100  # height
+                            ]
+
+                            detection = {
+                                'bbox': bbox_percent,
+                                'user_id': user_id,
+                                'confidence': identification_confidence,
+                                'name': name,
+                                'loyalty_status': loyalty_status,
+                                'object_id': object_id
+                            }
+                            overlay_data['detections'].append(detection)
+
+            return overlay_data
+
+        except Exception as e:
+            logger.error("Error processing frame for overlay", error=str(e), camera_id=camera_id)
+            return {
+                'camera_id': camera_id,
+                'timestamp': datetime.utcnow().isoformat(),
+                'detections': [],
+                'error': str(e)
+            }
 
     async def process_frame(self, frame: np.ndarray, camera_id: str = None):
         """Process a single frame: detect people, then faces, create events and track objects."""
@@ -289,6 +392,15 @@ class EdgeProcessor:
                                 user_id = recognition_result.get('id')
                                 identification_confidence = recognition_result.get('confidence', 0.0)
                                 logger.info("Face recognized", user_id=user_id, confidence=identification_confidence, camera_id=camera_id or config.camera_id)
+                            else:
+                                # Face not recognized, auto-register new user
+                                logger.info("Unrecognized face detected, auto-registering new user", camera_id=camera_id or config.camera_id)
+                                user_id = await self.auto_register_user(face_crop_b64)
+                                if user_id:
+                                    identification_confidence = 1.0  # New user, full confidence
+                                    logger.info("Auto-registration successful", user_id=user_id, camera_id=camera_id or config.camera_id)
+                                else:
+                                    logger.warning("Auto-registration failed", camera_id=camera_id or config.camera_id)
 
                             # Update tracked object with user identification
                             tracked_obj.user_id = user_id
@@ -480,6 +592,24 @@ async def get_camera_stream(camera_id: str):
         media_type="multipart/x-mixed-replace; boundary=frame"
     )
 
+@app.get("/cameras")
+async def get_cameras():
+    """Get list of all cameras with their states."""
+    if not processor:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+    cameras = []
+    for camera in processor.camera_manager.get_all_cameras():
+        status = camera.get_status()
+        cameras.append({
+            "id": camera.camera_id,
+            "name": f"Camera {camera.camera_id}",
+            "status": "online" if status.get('connected', False) else "offline",
+            "last_seen": status.get('last_frame_time', datetime.utcnow().isoformat()),
+            "location": getattr(camera, 'location', 'Unknown')
+        })
+    return cameras
+
 @app.get("/cameras/{camera_id}/tracking")
 async def get_camera_tracking(camera_id: str):
     """Get current tracking data for a camera."""
@@ -488,6 +618,33 @@ async def get_camera_tracking(camera_id: str):
 
     tracking_data = processor.get_camera_tracking_data(camera_id)
     return {"camera_id": camera_id, "tracked_objects": tracking_data}
+
+@app.post("/process-frame")
+async def process_frame_endpoint(request: dict):
+    """Process a video frame from frontend and return overlay data."""
+    if not processor:
+        raise HTTPException(status_code=503, detail="Service not ready")
+
+    try:
+        frame_b64 = request.get('frame_b64')
+        camera_id = request.get('camera_id', 'device-camera')
+
+        if not frame_b64:
+            raise HTTPException(status_code=400, detail="frame_b64 is required")
+
+        # Decode base64 image
+        image_data = base64.b64decode(frame_b64)
+        pil_image = Image.open(io.BytesIO(image_data))
+        frame = cv2.cvtColor(np.array(pil_image), cv2.COLOR_RGB2BGR)
+
+        # Process frame and get overlay data
+        overlay_data = await processor.process_frame_for_overlay(frame, camera_id)
+
+        return overlay_data
+
+    except Exception as e:
+        logger.error("Error processing frame", error=str(e))
+        raise HTTPException(status_code=500, detail=f"Frame processing failed: {str(e)}")
 
 @app.websocket("/ws/tracking")
 async def websocket_tracking(websocket: WebSocket):

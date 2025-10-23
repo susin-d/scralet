@@ -9,4 +9,4 @@ REM Start all services defined in docker-compose.yml in detached mode
 docker-compose up -d
 
 REM Open the frontend in the default web browser
-start http://localhost
+start http://localhost:8080

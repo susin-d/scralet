@@ -1,6 +1,6 @@
 {
-  "name": "Sentient Supermarket Dashboard",
-  "description": "A real-time dashboard that displays multiple live CCTV feeds with AI-generated data overlays, providing a single pane of glass for monitoring and understanding in-store activity.",
+  "name": "Sentient Retail SaaS Platform",
+  "description": "A comprehensive SaaS platform for retail analytics, providing real-time insights into store performance, customer behavior, and operational efficiency through an intuitive and data-rich dashboard interface.",
   "requestFramePermissions": [
     "camera"
   ]

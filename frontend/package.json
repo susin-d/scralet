@@ -1,5 +1,5 @@
 {
-  "name": "sentient-supermarket-dashboard",
+  "name": "sentient-retail-saas-platform",
   "private": true,
   "version": "0.0.0",
   "type": "module",
@@ -9,10 +9,11 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "axios": "^1.6.0",
-    "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "react-router-dom": "^7.9.4"
+    "recharts": "^3.3.0",
+    "react": "^19.2.0",
+    "@google/genai": "^1.26.0",
+    "axios": "^1.6.0"
   },
   "devDependencies": {
     "@types/node": "^22.14.0",

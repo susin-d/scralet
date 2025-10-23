@@ -45,10 +45,22 @@ def init_milvus():
         schema = CollectionSchema(fields, "Face embeddings collection")
         try:
             collection = Collection(config.collection_name, schema)
-            logger.info("Milvus collection created or already exists")
+            # Create index for vector search
+            index_params = {
+                "metric_type": "L2",
+                "index_type": "IVF_FLAT",
+                "params": {"nlist": 128}
+            }
+            collection.create_index("embedding", index_params)
+            logger.info("Milvus collection created with index")
         except Exception as e:
             logger.warning("Collection might already exist", error=str(e))
             collection = Collection(config.collection_name)
+            # Ensure index exists
+            try:
+                collection.create_index("embedding", {"metric_type": "L2", "index_type": "IVF_FLAT", "params": {"nlist": 128}})
+            except Exception as index_e:
+                logger.info("Index might already exist", error=str(index_e))
         return collection
     except Exception as e:
         logger.warning("Milvus not available, using mock", error=str(e))
@@ -149,6 +161,19 @@ async def get_user_data(user_id: str) -> dict:
             logger.error("Error calling user service", error=str(e))
             return None
 
+async def get_user_data_by_vector_id(vector_id: int) -> dict:
+    async with httpx.AsyncClient() as client:
+        try:
+            response = await client.get(f"{config.user_service_url}/customer/by-vector/{vector_id}")
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning("Failed to get user data by vector ID", vector_id=vector_id, status=response.status_code)
+                return None
+        except Exception as e:
+            logger.error("Error calling user service for vector ID", error=str(e))
+            return None
+
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
@@ -194,20 +219,21 @@ async def recognize_face(request: RecognizeRequest):
 
             tracked_objects = []
             for face in similar_faces:
-                # Get user data from user service
-                user_data = await get_user_data(str(face["id"]))
+                # Get user data from user service using vector ID
+                user_data = await get_user_data_by_vector_id(face["id"])
                 if user_data:
                     confidence = max(0, 1 - face["distance"])  # Convert distance to confidence
                     tracked_obj = TrackedObject(
-                        id=str(face["id"]),
+                        id=user_data["id"],
                         name=user_data["name"],
                         confidence=confidence,
                         loyalty_status=user_data["loyalty_status"]
                     )
                     tracked_objects.append(tracked_obj)
 
+            # If no matches found, return empty list (will trigger auto-registration in edge-processor)
             REQUEST_COUNT.labels(method='POST', endpoint='/recognize', status='200').inc()
-            logger.info("Face recognition completed successfully")
+            logger.info("Face recognition completed successfully", matches_found=len(tracked_objects))
             return RecognizeResponse(tracked_objects=tracked_objects)
         except Exception as e:
             REQUEST_COUNT.labels(method='POST', endpoint='/recognize', status='500').inc()

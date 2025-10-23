@@ -49,10 +49,22 @@ def init_milvus():
         schema = CollectionSchema(fields, "Face embeddings collection")
         try:
             collection = Collection(config.collection_name, schema)
-            logger.info("Milvus collection created or already exists")
+            # Create index for vector search
+            index_params = {
+                "metric_type": "L2",
+                "index_type": "IVF_FLAT",
+                "params": {"nlist": 128}
+            }
+            collection.create_index("embedding", index_params)
+            logger.info("Milvus collection created with index")
         except Exception as e:
             logger.warning("Collection might already exist", error=str(e))
             collection = Collection(config.collection_name)
+            # Ensure index exists
+            try:
+                collection.create_index("embedding", {"metric_type": "L2", "index_type": "IVF_FLAT", "params": {"nlist": 128}})
+            except Exception as index_e:
+                logger.info("Index might already exist", error=str(index_e))
         return collection
     except Exception as e:
         logger.warning("Milvus not available, using mock", error=str(e))
@@ -70,6 +82,17 @@ app = FastAPI(title="User Service", version="1.0.0")
 class RegisterRequest(BaseModel):
     name: str
     email: str
+    face_image_b64: str
+
+    @field_validator('face_image_b64')
+    def validate_base64(cls, v):
+        try:
+            base64.b64decode(v)
+            return v
+        except Exception:
+            raise ValueError('Invalid base64 string')
+
+class AutoRegisterRequest(BaseModel):
     face_image_b64: str
 
     @field_validator('face_image_b64')
@@ -171,6 +194,50 @@ async def register(
             logger.error("Database error during registration", error=str(e))
             raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.post("/auto-register", response_model=RegisterResponse)
+async def auto_register(
+    request: AutoRegisterRequest,
+    db: Session = Depends(get_db)
+):
+    with REQUEST_LATENCY.labels(method='POST', endpoint='/auto-register').time():
+        logger.info("Auto-registration request for unrecognized face")
+
+        try:
+            # Get embedding from face recognition service
+            embedding = await get_embedding_from_face_service(request.face_image_b64)
+        except Exception as e:
+            logger.error("Face recognition service failed, using fallback", error=str(e))
+            # Fallback: generate a dummy embedding
+            embedding = [0.0] * 512  # Dummy embedding
+
+        # Store embedding in Milvus and get vector ID
+        milvus_vector_id = store_embedding_in_milvus(embedding)
+
+        try:
+            # Generate a unique name and email for the new user
+            customer_id = str(uuid.uuid4())
+            name = f"Guest_{customer_id[:8]}"
+            email = f"{name}@auto.generated"
+
+            # Create customer
+            customer = Customer(
+                id=customer_id,
+                name=name,
+                email=email,
+                milvus_vector_id=milvus_vector_id
+            )
+            db.add(customer)
+            db.commit()
+            db.refresh(customer)
+
+            REQUEST_COUNT.labels(method='POST', endpoint='/auto-register', status='200').inc()
+            logger.info("Auto-registration successful", customer_id=str(customer.id))
+            return RegisterResponse(message="Auto-registration successful", customer_id=str(customer.id))
+        except Exception as e:
+            REQUEST_COUNT.labels(method='POST', endpoint='/auto-register', status='500').inc()
+            logger.error("Database error during auto-registration", error=str(e))
+            raise HTTPException(status_code=500, detail="Internal server error")
+
 @app.get("/customer/{customer_id}", response_model=CustomerResponse)
 async def get_customer(
     customer_id: str,
@@ -190,6 +257,27 @@ async def get_customer(
         )
     except Exception as e:
         logger.error("Database error retrieving customer", customer_id=customer_id, error=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")
+
+@app.get("/customer/by-vector/{vector_id}", response_model=CustomerResponse)
+async def get_customer_by_vector_id(
+    vector_id: int,
+    db: Session = Depends(get_db)
+):
+    try:
+        customer = db.query(Customer).filter(Customer.milvus_vector_id == vector_id).first()
+        if not customer:
+            raise HTTPException(status_code=404, detail="Customer not found")
+
+        return CustomerResponse(
+            id=str(customer.id),
+            name=customer.name,
+            email=customer.email,
+            loyalty_status=customer.loyalty_status,
+            created_at=customer.created_at.isoformat()
+        )
+    except Exception as e:
+        logger.error("Database error retrieving customer by vector ID", vector_id=vector_id, error=str(e))
         raise HTTPException(status_code=500, detail="Internal server error")
 
 if __name__ == "__main__":
