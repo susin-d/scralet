@@ -1,8 +1,10 @@
 import React, { useState, useEffect, useRef } from 'react';
 import Card from '../Card';
 import { MOCK_CUSTOMERS, MOCK_ALERTS } from '../../constants';
-import type { Camera, Customer, Alert } from '../../types';
+import type { Camera, Customer, Alert, ApiCamera, ApiTrackedObject, ProcessFrameResponse } from '../../types';
 import { AlertTriangleIcon } from '../Icons';
+import { camerasApi } from '../../src/api/cameras';
+import { trackingWebSocket } from '../../src/api/websocket';
 
 const LOYALTY_COLORS: { [key in Customer['loyaltyTier']]: string } = {
     Gold: '#FFD700',
@@ -77,20 +79,33 @@ const CustomerInfoPanel: React.FC<{ customer: Customer | null }> = ({ customer }
 
 const CameraCardComponent: React.FC<{
     camera: Camera,
-}> = ({ camera }) => {
+    trackedObjects?: ApiTrackedObject[],
+    onCustomerSelect?: (customerId: string) => void,
+}> = ({ camera, trackedObjects = [], onCustomerSelect }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null);
     const streamRef = useRef<MediaStream | null>(null);
 
     useEffect(() => {
         if (camera.isLive) {
             const getStream = async () => {
                 try {
-                    const stream = await navigator.mediaDevices.getUserMedia({
-                        video: { deviceId: camera.deviceId ? { exact: camera.deviceId } : undefined }
-                    });
-                    streamRef.current = stream;
-                    if (videoRef.current) {
-                        videoRef.current.srcObject = stream;
+                    // Try API stream first for non-live cameras
+                    if (!camera.deviceId || camera.deviceId.startsWith('live-')) {
+                        // Fallback to local camera
+                        const stream = await navigator.mediaDevices.getUserMedia({
+                            video: { deviceId: camera.deviceId && !camera.deviceId.startsWith('live-') ? { exact: camera.deviceId } : undefined }
+                        });
+                        streamRef.current = stream;
+                        if (videoRef.current) {
+                            videoRef.current.srcObject = stream;
+                        }
+                    } else {
+                        // Try API stream
+                        const streamUrl = camerasApi.getCameraStream(camera.id);
+                        if (videoRef.current) {
+                            videoRef.current.src = streamUrl;
+                        }
                     }
                 } catch (err) {
                     console.error("Error getting stream for device:", camera.deviceId, err);
@@ -104,7 +119,29 @@ const CameraCardComponent: React.FC<{
                 streamRef.current.getTracks().forEach(track => track.stop());
             }
         };
-    }, [camera.isLive, camera.deviceId]);
+    }, [camera.isLive, camera.deviceId, camera.id]);
+
+    const processFrame = async () => {
+        if (videoRef.current && canvasRef.current) {
+            const canvas = canvasRef.current;
+            const ctx = canvas.getContext('2d');
+            if (ctx) {
+                canvas.width = videoRef.current.videoWidth;
+                canvas.height = videoRef.current.videoHeight;
+                ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
+                const dataUrl = canvas.toDataURL('image/png');
+                const base64Data = dataUrl.split(',')[1];
+
+                try {
+                    const response = await camerasApi.processFrame(base64Data, camera.id);
+                    // Handle detections - they will come through WebSocket
+                    console.log('Frame processed:', response);
+                } catch (err) {
+                    console.error('Failed to process frame:', err);
+                }
+            }
+        }
+    };
 
     const handleSnapshot = () => {
         if (videoRef.current) {
@@ -136,11 +173,36 @@ const CameraCardComponent: React.FC<{
             </div>
             <div className="relative aspect-video rounded-md overflow-hidden bg-black">
                 <video ref={videoRef} autoPlay playsInline muted className="w-full h-full object-cover" />
+                <canvas ref={canvasRef} className="absolute inset-0 w-full h-full pointer-events-none" />
+                {/* Overlay for tracked objects */}
+                {trackedObjects.map((obj) => (
+                    <div
+                        key={obj.object_id}
+                        className="absolute border-2 border-accent pointer-events-none"
+                        style={{
+                            left: `${obj.bbox[0]}px`,
+                            top: `${obj.bbox[1]}px`,
+                            width: `${obj.bbox[2] - obj.bbox[0]}px`,
+                            height: `${obj.bbox[3] - obj.bbox[1]}px`,
+                        }}
+                    >
+                        {obj.user_id && (
+                            <div className="absolute -top-6 left-0 bg-accent text-white text-xs px-1 rounded">
+                                {obj.user_id}
+                            </div>
+                        )}
+                    </div>
+                ))}
             </div>
-            <div className="flex justify-between mt-4">
-                <button 
+            <div className="flex justify-between mt-4 gap-2">
+                <button
+                    onClick={processFrame}
+                    className="flex-1 text-sm bg-accent hover:opacity-90 text-white px-4 py-2 rounded-md transition-transform duration-200 ease-in-out hover:scale-105 active:scale-95">
+                    Process Frame
+                </button>
+                <button
                     onClick={handleSnapshot}
-                    className="w-full text-sm bg-gray-600 hover:bg-gray-500 text-text-primary px-4 py-2 rounded-md transition-transform duration-200 ease-in-out hover:scale-105 active:scale-95">
+                    className="flex-1 text-sm bg-gray-600 hover:bg-gray-500 text-text-primary px-4 py-2 rounded-md transition-transform duration-200 ease-in-out hover:scale-105 active:scale-95">
                     Snapshot
                 </button>
             </div>
@@ -164,10 +226,38 @@ const AlertsPanel: React.FC<{ alerts: Alert[] }> = ({ alerts }) => (
 
 const CameraView: React.FC = () => {
   const [cameras, setCameras] = useState<Camera[]>([]);
+  const [apiCameras, setApiCameras] = useState<ApiCamera[]>([]);
+  const [trackedObjects, setTrackedObjects] = useState<{ [cameraId: string]: ApiTrackedObject[] }>({});
   const [selectedCustomer, setSelectedCustomer] = useState<Customer | null>(null);
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const setupLiveCameras = async () => {
+    const fetchCameras = async () => {
+      try {
+        setLoading(true);
+        const apiCams = await camerasApi.getCameras();
+        setApiCameras(apiCams);
+
+        // Convert API cameras to frontend format
+        const frontendCameras: Camera[] = apiCams.map(cam => ({
+          id: cam.id,
+          name: cam.name,
+          location: cam.location,
+          status: cam.status === 'online' ? 'Online' : 'Offline',
+          isLive: cam.status === 'online',
+          deviceId: cam.id, // Use camera ID as device ID for now
+        }));
+        setCameras(frontendCameras);
+      } catch (err) {
+        console.error('Failed to fetch cameras:', err);
+        // Fallback to local cameras if API fails
+        setupLocalCameras();
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    const setupLocalCameras = async () => {
       try {
         if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
             console.warn("Media devices API not available.");
@@ -180,7 +270,6 @@ const CameraView: React.FC = () => {
         const videoDevices = devices.filter(device => device.kind === 'videoinput');
 
         if (videoDevices.length === 0) {
-            // Handle case with no cameras
             return;
         }
 
@@ -192,17 +281,52 @@ const CameraView: React.FC = () => {
           isLive: true,
           deviceId: device.deviceId,
         }));
-        
-        setCameras(liveCameras);
 
+        setCameras(liveCameras);
       } catch (err) {
         console.error("Could not access camera: ", err);
-        // Optionally, inform the user that camera access was denied.
       }
     };
 
-    setupLiveCameras();
+    fetchCameras();
+
+    // Connect to tracking WebSocket
+    trackingWebSocket.connect();
+    trackingWebSocket.on('message', (data) => {
+      if (data.type === 'tracking_update' && data.camera_id && data.tracked_objects) {
+        setTrackedObjects(prev => ({
+          ...prev,
+          [data.camera_id]: data.tracked_objects
+        }));
+      }
+    });
+
+    return () => {
+      trackingWebSocket.disconnect();
+    };
   }, []);
+
+  const handleCustomerSelect = (customerId: string) => {
+    const customer = MOCK_CUSTOMERS.find(c => c.id === customerId);
+    setSelectedCustomer(customer || null);
+  };
+
+  if (loading) {
+    return (
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <div className="lg:col-span-2 space-y-6">
+          <Card>
+            <div className="text-center text-text-secondary py-20">
+              <p>Loading cameras...</p>
+            </div>
+          </Card>
+        </div>
+        <div className="lg:col-span-1">
+          <CustomerInfoPanel customer={selectedCustomer} />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -210,7 +334,12 @@ const CameraView: React.FC = () => {
              {cameras.length > 0 ? (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     {cameras.map(cam => (
-                        <CameraCardComponent key={cam.id} camera={cam} />
+                        <CameraCardComponent
+                            key={cam.id}
+                            camera={cam}
+                            trackedObjects={trackedObjects[cam.id] || []}
+                            onCustomerSelect={handleCustomerSelect}
+                        />
                     ))}
                 </div>
             ) : (
