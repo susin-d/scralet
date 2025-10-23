@@ -19,6 +19,7 @@ from fastapi.responses import StreamingResponse
 import uvicorn
 from starlette.websockets import WebSocket, WebSocketDisconnect
 import websockets
+import httpx
 
 from config import config
 from camera_manager import CameraManager
@@ -67,6 +68,8 @@ class TrackedObject:
         self.confidence = confidence
         self.object_type = object_type
         self.last_seen = datetime.utcnow().isoformat()
+        self.user_id = None  # User ID if identified
+        self.identification_confidence = 0.0  # Confidence score for identification
 
     def to_dict(self):
         return {
@@ -75,7 +78,9 @@ class TrackedObject:
             'bbox': self.bbox,
             'confidence': self.confidence,
             'object_type': self.object_type,
-            'last_seen': self.last_seen
+            'last_seen': self.last_seen,
+            'user_id': self.user_id,
+            'identification_confidence': self.identification_confidence
         }
 
 class EdgeProcessor:
@@ -94,6 +99,10 @@ class EdgeProcessor:
         self.tracked_objects: Dict[str, TrackedObject] = {}
         self.websocket_clients: List[WebSocket] = []
         self.object_id_counter = 0
+        # Face recognition service URL
+        self.face_recognition_url = config.face_recognition_url
+        # Identity tracker service URL
+        self.identity_tracker_url = config.identity_tracker_url
         logger.info("EdgeProcessor initialized", camera_id=config.camera_id, store_zone=config.store_zone)
 
     def _initialize_cameras(self):
@@ -183,6 +192,35 @@ class EdgeProcessor:
             logger.error("Error encoding image to base64", error=str(e))
             return ""
 
+    async def recognize_face(self, face_image_b64: str) -> Optional[Dict]:
+        """Call face recognition service to identify the person."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.post(
+                    f"{self.face_recognition_url}/recognize",
+                    json={"face_image_b64": face_image_b64}
+                )
+                response.raise_for_status()
+                data = response.json()
+                if data.get('tracked_objects'):
+                    # Return the best match (highest confidence)
+                    return max(data['tracked_objects'], key=lambda x: x['confidence'])
+                return None
+        except Exception as e:
+            logger.error("Error calling face recognition service", error=str(e))
+            return None
+
+    async def get_user_face_data(self, user_id: str) -> Optional[Dict]:
+        """Get user face data from face recognition service."""
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{self.face_recognition_url}/users/{user_id}/face")
+                response.raise_for_status()
+                return response.json()
+        except Exception as e:
+            logger.error("Error getting user face data", user_id=user_id, error=str(e))
+            return None
+
     def send_to_kafka(self, event: SightingEvent):
         """Send SightingEvent to Kafka with retries."""
         max_retries = 3
@@ -212,7 +250,7 @@ class EdgeProcessor:
                     time.sleep(2 ** attempt)  # Exponential backoff
         logger.error("Failed to send event to Kafka after all retries, event lost", camera_id=event.camera_id)
 
-    def process_frame(self, frame: np.ndarray, camera_id: str = None):
+    async def process_frame(self, frame: np.ndarray, camera_id: str = None):
         """Process a single frame: detect people, then faces, create events and track objects."""
         try:
             people_boxes = self.detect_people(frame)
@@ -243,10 +281,23 @@ class EdgeProcessor:
                     if cropped_face is not None:
                         face_crop_b64 = self.encode_image_to_base64(cropped_face)
                         if face_crop_b64:
+                            # Recognize face using face recognition service
+                            recognition_result = await self.recognize_face(face_crop_b64)
+                            user_id = None
+                            identification_confidence = 0.0
+                            if recognition_result:
+                                user_id = recognition_result.get('id')
+                                identification_confidence = recognition_result.get('confidence', 0.0)
+                                logger.info("Face recognized", user_id=user_id, confidence=identification_confidence, camera_id=camera_id or config.camera_id)
+
+                            # Update tracked object with user identification
+                            tracked_obj.user_id = user_id
+                            tracked_obj.identification_confidence = identification_confidence
+
                             timestamp = datetime.utcnow().isoformat()
                             event = SightingEvent(camera_id or config.camera_id, timestamp, face_crop_b64, person_box)
                             self.send_to_kafka(event)
-                            logger.info("Sighting event created and sent", camera_id=camera_id or config.camera_id)
+                            logger.info("Sighting event created and sent", camera_id=camera_id or config.camera_id, user_id=user_id)
 
             # Update tracked objects
             self.update_tracked_objects(current_objects, camera_id or config.camera_id)
@@ -314,7 +365,11 @@ class EdgeProcessor:
                         cap.set(cv2.CAP_PROP_POS_FRAMES, 0)  # Loop back to beginning
                         continue
 
-                    self.process_frame(frame)
+                    # Create event loop for async processing
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    loop.run_until_complete(self.process_frame(frame))
+                    loop.close()
                     time.sleep(0.1)  # Small delay to prevent overwhelming the system
 
             except KeyboardInterrupt:
@@ -332,7 +387,11 @@ class EdgeProcessor:
                         if camera.is_connected():
                             frame = camera.read_frame()
                             if frame is not None:
-                                self.process_frame(frame, camera.camera_id)
+                                # Create event loop for async processing
+                                loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(loop)
+                                loop.run_until_complete(self.process_frame(frame, camera.camera_id))
+                                loop.close()
                             else:
                                 logger.debug("No frame available from camera", camera_id=camera.camera_id)
                         else:

@@ -3,12 +3,7 @@ from typing import Optional
 
 class Config:
     def __init__(self):
-        self.postgres_host: str = os.getenv('POSTGRES_HOST', 'localhost')
-        self.postgres_port: int = int(os.getenv('POSTGRES_PORT', '5432'))
-        self.postgres_db: str = os.getenv('POSTGRES_DB', 'user_service')
-        self.postgres_user: str = os.getenv('POSTGRES_USER', 'user')
-        self.postgres_password: str = os.getenv('POSTGRES_PASSWORD', 'password')
-        self.database_url: str = f"postgresql://{self.postgres_user}:{self.postgres_password}@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        self.database_url: str = os.getenv('DATABASE_URL', 'sqlite:///user_service.db')
 
         self.milvus_host: str = os.getenv('MILVUS_HOST', 'localhost')
         self.milvus_port: int = int(os.getenv('MILVUS_PORT', '19530'))

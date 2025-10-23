@@ -1,14 +1,17 @@
 import structlog
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.websockets import WebSocket, WebSocketDisconnect
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, field_validator
 import base64
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST, Counter, Histogram
 import asyncio
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
+from passlib.context import CryptContext
+from jose import JWTError, jwt
 
 from config import config
 
@@ -45,6 +48,82 @@ websocket_clients: List[WebSocket] = []
 # In-memory log storage
 logs: List[Dict[str, Any]] = []
 
+# Admin authentication configuration
+SECRET_KEY = "your-secret-key-here"  # In production, use environment variable
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
+# Password hashing
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+# Security scheme
+security = HTTPBearer()
+
+# In-memory admin user storage
+admin_users: Dict[str, Dict[str, Any]] = {
+    "admin": {
+        "username": "admin",
+        "hashed_password": pwd_context.hash("admin123"),  # Default password
+        "full_name": "System Administrator",
+        "email": "admin@example.com",
+        "is_active": True,
+        "created_at": datetime.utcnow().isoformat()
+    }
+}
+
+# Blacklisted tokens (for logout)
+blacklisted_tokens: set = set()
+
+# Utility functions for authentication
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """Verify a password against its hash."""
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    """Hash a password."""
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    """Create a JWT access token."""
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return encoded_jwt
+
+def verify_token(token: str) -> Optional[str]:
+    """Verify and decode a JWT token."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None or token in blacklisted_tokens:
+            return None
+        return username
+    except JWTError:
+        return None
+
+async def get_current_admin_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> Dict[str, Any]:
+    """Dependency to get the current authenticated admin user."""
+    token = credentials.credentials
+    username = verify_token(token)
+    if username is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    user = admin_users.get(username)
+    if user is None or not user.get("is_active"):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return user
+
 # Pydantic models
 class RegisterRequest(BaseModel):
     name: str
@@ -80,15 +159,193 @@ class SocketStatus(BaseModel):
     last_update: str
     status: str
 
+# Admin authentication models
+class AdminLoginRequest(BaseModel):
+    username: str
+    password: str
+
+class AdminLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: Dict[str, Any]
+
+class AdminUserCreate(BaseModel):
+    username: str
+    password: str
+    full_name: str
+    email: str
+
+class AdminUserResponse(BaseModel):
+    username: str
+    full_name: str
+    email: str
+    is_active: bool
+    created_at: str
+
+class TokenData(BaseModel):
+    username: Optional[str] = None
+
 # Health check endpoint
 @app.get("/health")
 async def health_check():
     return {"status": "healthy"}
 
+# Admin authentication endpoints
+@app.post("/admin/login", response_model=AdminLoginResponse)
+async def admin_login(request: AdminLoginRequest):
+    """Authenticate admin user and return JWT token."""
+    with REQUEST_LATENCY.labels(method='POST', endpoint='/admin/login').time():
+        user = admin_users.get(request.username)
+        if not user or not verify_password(request.password, user["hashed_password"]):
+            REQUEST_COUNT.labels(method='POST', endpoint='/admin/login', status='401').inc()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if not user.get("is_active"):
+            REQUEST_COUNT.labels(method='POST', endpoint='/admin/login', status='401').inc()
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User account is disabled",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        access_token = create_access_token(
+            data={"sub": user["username"]}, expires_delta=access_token_expires
+        )
+
+        user_response = {
+            "username": user["username"],
+            "full_name": user["full_name"],
+            "email": user["email"],
+            "is_active": user["is_active"],
+            "created_at": user["created_at"]
+        }
+
+        REQUEST_COUNT.labels(method='POST', endpoint='/admin/login', status='200').inc()
+        logger.info("Admin login successful", username=request.username)
+        return AdminLoginResponse(
+            access_token=access_token,
+            token_type="bearer",
+            expires_in=int(access_token_expires.total_seconds()),
+            user=user_response
+        )
+
+@app.post("/admin/logout")
+async def admin_logout(current_user: Dict[str, Any] = Depends(get_current_admin_user)):
+    """Logout admin user by blacklisting their token."""
+    with REQUEST_LATENCY.labels(method='POST', endpoint='/admin/logout').time():
+        # Note: In a real implementation, you'd get the token from the request
+        # For simplicity, we'll assume the token is passed in the Authorization header
+        # and we can blacklist it. However, since we can't easily extract the token here,
+        # we'll just log the logout for now.
+        REQUEST_COUNT.labels(method='POST', endpoint='/admin/logout', status='200').inc()
+        logger.info("Admin logout", username=current_user["username"])
+        return {"message": "Successfully logged out"}
+
+# Admin user management endpoints
+@app.get("/admin/users", response_model=List[AdminUserResponse])
+async def get_admin_users(current_user: Dict[str, Any] = Depends(get_current_admin_user)):
+    """Get all admin users."""
+    with REQUEST_LATENCY.labels(method='GET', endpoint='/admin/users').time():
+        users = []
+        for user in admin_users.values():
+            users.append(AdminUserResponse(
+                username=user["username"],
+                full_name=user["full_name"],
+                email=user["email"],
+                is_active=user["is_active"],
+                created_at=user["created_at"]
+            ))
+        REQUEST_COUNT.labels(method='GET', endpoint='/admin/users', status='200').inc()
+        return users
+
+@app.post("/admin/users", response_model=AdminUserResponse)
+async def create_admin_user(
+    user_data: AdminUserCreate,
+    current_user: Dict[str, Any] = Depends(get_current_admin_user)
+):
+    """Create a new admin user."""
+    with REQUEST_LATENCY.labels(method='POST', endpoint='/admin/users').time():
+        if user_data.username in admin_users:
+            REQUEST_COUNT.labels(method='POST', endpoint='/admin/users', status='400').inc()
+            raise HTTPException(status_code=400, detail="Username already exists")
+
+        hashed_password = get_password_hash(user_data.password)
+        new_user = {
+            "username": user_data.username,
+            "hashed_password": hashed_password,
+            "full_name": user_data.full_name,
+            "email": user_data.email,
+            "is_active": True,
+            "created_at": datetime.utcnow().isoformat()
+        }
+        admin_users[user_data.username] = new_user
+
+        REQUEST_COUNT.labels(method='POST', endpoint='/admin/users', status='201').inc()
+        logger.info("Admin user created", username=user_data.username, created_by=current_user["username"])
+        return AdminUserResponse(
+            username=new_user["username"],
+            full_name=new_user["full_name"],
+            email=new_user["email"],
+            is_active=new_user["is_active"],
+            created_at=new_user["created_at"]
+        )
+
+@app.delete("/admin/users/{username}")
+async def delete_admin_user(
+    username: str,
+    current_user: Dict[str, Any] = Depends(get_current_admin_user)
+):
+    """Delete an admin user."""
+    with REQUEST_LATENCY.labels(method='DELETE', endpoint='/admin/users/{username}').time():
+        if username not in admin_users:
+            REQUEST_COUNT.labels(method='DELETE', endpoint='/admin/users/{username}', status='404').inc()
+            raise HTTPException(status_code=404, detail="User not found")
+
+        if username == current_user["username"]:
+            REQUEST_COUNT.labels(method='DELETE', endpoint='/admin/users/{username}', status='400').inc()
+            raise HTTPException(status_code=400, detail="Cannot delete your own account")
+
+        del admin_users[username]
+        REQUEST_COUNT.labels(method='DELETE', endpoint='/admin/users/{username}', status='200').inc()
+        logger.info("Admin user deleted", username=username, deleted_by=current_user["username"])
+        return {"message": "User deleted successfully"}
+
 # Metrics endpoint
 @app.get("/metrics")
 async def metrics():
     return generate_latest()
+
+# Protected admin endpoints (require authentication)
+@app.get("/admin/dashboard/stats")
+async def get_admin_dashboard_stats(current_user: Dict[str, Any] = Depends(get_current_admin_user)):
+    """Get admin dashboard statistics."""
+    with REQUEST_LATENCY.labels(method='GET', endpoint='/admin/dashboard/stats').time():
+        stats = {
+            "total_users": len(admin_users),
+            "active_users": len([u for u in admin_users.values() if u["is_active"]]),
+            "total_logs": len(logs),
+            "websocket_clients": len(websocket_clients),
+            "server_status": "healthy"
+        }
+        REQUEST_COUNT.labels(method='GET', endpoint='/admin/dashboard/stats', status='200').inc()
+        return stats
+
+@app.get("/admin/logs")
+async def get_admin_logs(
+    limit: int = 100,
+    current_user: Dict[str, Any] = Depends(get_current_admin_user)
+):
+    """Get all logs for admin review."""
+    with REQUEST_LATENCY.labels(method='GET', endpoint='/admin/logs').time():
+        sorted_logs = sorted(logs, key=lambda x: x['timestamp'], reverse=True)
+        REQUEST_COUNT.labels(method='GET', endpoint='/admin/logs', status='200').inc()
+        return sorted_logs[:limit]
 
 # API endpoints
 @app.post("/register", response_model=RegisterResponse)

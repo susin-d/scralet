@@ -21,4 +21,8 @@ class Config:
         # General camera monitoring
         self.camera_monitor_interval: int = int(os.getenv('CAMERA_MONITOR_INTERVAL', '10'))
 
-config = Config()
+        # Service URLs for face recognition and identity tracking
+        self.face_recognition_url: str = os.getenv('FACE_RECOGNITION_URL', 'http://face-recognition:8000')
+        self.identity_tracker_url: str = os.getenv('IDENTITY_TRACKER_URL', 'http://identity-tracker:8001')
+
+        config = Config()

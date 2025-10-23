@@ -177,12 +177,7 @@ async def get_customer(
     db: Session = Depends(get_db)
 ):
     try:
-        customer_uuid = uuid.UUID(customer_id)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid customer ID format")
-
-    try:
-        customer = db.query(Customer).filter(Customer.id == customer_uuid).first()
+        customer = db.query(Customer).filter(Customer.id == customer_id).first()
         if not customer:
             raise HTTPException(status_code=404, detail="Customer not found")
 

@@ -1,6 +1,5 @@
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Integer, DateTime, func
-from sqlalchemy.dialects.postgresql import UUID
 import uuid
 
 class Base(DeclarativeBase):
@@ -9,7 +8,7 @@ class Base(DeclarativeBase):
 class Customer(Base):
     __tablename__ = 'customers'
 
-    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, index=True)
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()), index=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     milvus_vector_id: Mapped[int] = mapped_column(Integer, nullable=False)

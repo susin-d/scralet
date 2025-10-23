@@ -58,7 +58,7 @@ def run_migrations_online() -> None:
 
     """
     configuration = config.get_section(config.config_ini_section)
-    configuration["sqlalchemy.url"] = "postgresql://user:password@localhost:5432/user_service"
+    configuration["sqlalchemy.url"] = "sqlite:///user_service.db"
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",

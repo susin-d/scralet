@@ -5,6 +5,7 @@ import { SocketStatus } from '../types';
 interface HeaderProps {
   status: SocketStatus;
   alertCount: number;
+  onLogout?: () => void;
 }
 
 const statusConfig = {
@@ -13,7 +14,7 @@ const statusConfig = {
     connecting: { text: 'Connecting...', color: 'bg-yellow-500', pulse: true },
 };
 
-const Header: React.FC<HeaderProps> = ({ status, alertCount }) => {
+const Header: React.FC<HeaderProps> = ({ status, alertCount, onLogout }) => {
   const { text, color, pulse } = statusConfig[status];
 
   return (
@@ -36,6 +37,14 @@ const Header: React.FC<HeaderProps> = ({ status, alertCount }) => {
           <span className="font-semibold">Alerts:</span>
           <span className="text-yellow-400 font-bold">{alertCount}</span>
         </div>
+        {onLogout && (
+          <button
+            onClick={onLogout}
+            className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-lg transition duration-200 focus:outline-none focus:ring-2 focus:ring-red-500 focus:ring-offset-2 focus:ring-offset-gray-800"
+          >
+            Logout
+          </button>
+        )}
       </div>
     </header>
   );

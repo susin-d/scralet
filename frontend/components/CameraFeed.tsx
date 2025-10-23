@@ -5,6 +5,7 @@ import OverlayBox from './OverlayBox';
 
 interface CameraFeedProps {
   camera: CameraState;
+  isAdmin?: boolean;
 }
 
 // SVG Icons for controls
@@ -30,7 +31,7 @@ const VolumeOffIcon = () => (
     </svg>
 );
 
-const CameraFeed: React.FC<CameraFeedProps> = ({ camera }) => {
+const CameraFeed: React.FC<CameraFeedProps> = ({ camera, isAdmin = false }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(true);
   const [volume, setVolume] = useState(0.5);
@@ -38,9 +39,13 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ camera }) => {
   const [error, setError] = useState<string | null>(null);
   const [isHovered, setIsHovered] = useState(false);
   const [trackedObjects, setTrackedObjects] = useState<TrackedObject[]>(camera.trackedObjects || []);
+  const [isEnabled, setIsEnabled] = useState(true);
+  const [showDetails, setShowDetails] = useState(false);
 
   useEffect(() => {
     const setupCameraStream = async () => {
+      if (!isEnabled) return;
+
       try {
         // Use real camera stream from edge-processor
         const streamUrl = `http://edge-processor:8000/cameras/${camera.id}/stream`;
@@ -57,14 +62,16 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ camera }) => {
     setupCameraStream();
 
     // Fetch initial tracking data
-    fetchTrackingData();
+    if (isEnabled) {
+      fetchTrackingData();
+    }
 
     return () => {
       if (videoRef.current) {
         videoRef.current.src = '';
       }
     };
-  }, [camera.id]);
+  }, [camera.id, isEnabled]);
 
   const fetchTrackingData = async () => {
     try {
@@ -83,6 +90,8 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ camera }) => {
 
   // Set up WebSocket for real-time tracking updates
   useEffect(() => {
+    if (!isEnabled) return;
+
     const ws = new WebSocket('ws://edge-processor:8000/ws/tracking');
 
     ws.onopen = () => {
@@ -111,7 +120,7 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ camera }) => {
     return () => {
       ws.close();
     };
-  }, [camera.id]);
+  }, [camera.id, isEnabled]);
   
   useEffect(() => {
     if (videoRef.current) {
@@ -144,20 +153,43 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ camera }) => {
     setIsMuted(prev => !prev);
   }
 
+  const handleToggleCamera = () => {
+    setIsEnabled(prev => !prev);
+    if (isEnabled) {
+      setError(null);
+    }
+  }
+
+  const handleViewDetails = () => {
+    setShowDetails(prev => !prev);
+  }
+
   return (
-    <div 
-      className="bg-black rounded-lg overflow-hidden relative aspect-video border border-gray-700 shadow-lg group"
+    <div
+      className={`bg-black rounded-lg overflow-hidden relative aspect-video border shadow-lg group ${isEnabled ? 'border-gray-700' : 'border-red-500 opacity-50'}`}
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => setIsHovered(false)}
     >
-      <video
-        ref={videoRef}
-        autoPlay
-        playsInline
-        muted
-        className="w-full h-full object-cover"
-      />
-      {error && (
+      {isEnabled ? (
+        <video
+          ref={videoRef}
+          autoPlay
+          playsInline
+          muted
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full bg-gray-800 flex items-center justify-center">
+          <div className="text-center text-white">
+            <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mx-auto mb-2 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 10l4.553-2.276A1 1 0 0121 8.618v6.764a1 1 0 01-1.447.894L15 14M5 18h8a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z" />
+            </svg>
+            <p className="text-sm">Camera Disabled</p>
+          </div>
+        </div>
+      )}
+
+      {error && isEnabled && (
         <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center text-center p-4">
           <svg xmlns="http://www.w3.org/2000/svg" className="h-10 w-10 text-red-500 mb-2" viewBox="0 0 20 20" fill="currentColor">
             <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
@@ -166,53 +198,88 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ camera }) => {
         </div>
       )}
 
-      <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
-        {trackedObjects.map(obj => (
-          <OverlayBox key={obj.object_id} trackedObject={{
-            id: obj.object_id,
-            type: obj.object_type === 'person' ? 'tracking' : 'identified',
-            bbox: obj.bbox,
-            confidence: obj.confidence,
-            name: obj.object_type === 'person' ? undefined : obj.object_id,
-            personId: obj.object_type === 'person' ? undefined : obj.object_id,
-            isLoyalMember: false
-          }} />
-        ))}
-      </div>
+      {isEnabled && (
+        <div className="absolute top-0 left-0 w-full h-full pointer-events-none">
+          {trackedObjects.map(obj => (
+            <OverlayBox key={obj.object_id} trackedObject={{
+              id: obj.object_id,
+              type: obj.object_type === 'person' ? 'tracking' : 'identified',
+              bbox: obj.bbox,
+              confidence: obj.confidence,
+              name: obj.object_type === 'person' ? undefined : obj.object_id,
+              personId: obj.object_type === 'person' ? undefined : obj.object_id,
+              isLoyalMember: false
+            }} />
+          ))}
+        </div>
+      )}
 
       <div className="absolute top-2 left-2 bg-black/50 text-white text-xs font-bold px-2 py-1 rounded">
         {camera.name}
       </div>
-      
+
       <div className="absolute top-2 right-2 flex items-center space-x-2">
-        <span className="text-xs font-bold text-red-500 bg-black/50 px-2 py-1 rounded animate-pulse">CCTV LIVE</span>
-        <button className="bg-blue-600/50 hover:bg-blue-500 text-white text-xs px-2 py-1 rounded transition-colors">
-          Connect
-        </button>
+        {isEnabled && (
+          <span className="text-xs font-bold text-red-500 bg-black/50 px-2 py-1 rounded animate-pulse">CCTV LIVE</span>
+        )}
+        {isAdmin && (
+          <>
+            <button
+              onClick={handleToggleCamera}
+              className={`text-white text-xs px-2 py-1 rounded transition-colors ${
+                isEnabled ? 'bg-red-600/50 hover:bg-red-700' : 'bg-green-600/50 hover:bg-green-700'
+              }`}
+            >
+              {isEnabled ? 'Disable' : 'Enable'}
+            </button>
+            <button
+              onClick={handleViewDetails}
+              className="bg-blue-600/50 hover:bg-blue-500 text-white text-xs px-2 py-1 rounded transition-colors"
+            >
+              Details
+            </button>
+          </>
+        )}
       </div>
 
-      {/* Controls Overlay */}
-      <div className={`absolute bottom-0 left-0 w-full bg-gradient-to-t from-black/70 to-transparent p-4 transition-opacity duration-300 ${isHovered ? 'opacity-100' : 'opacity-0'}`}>
-        <div className="flex items-center space-x-4">
-          <button onClick={handlePlayPause} className="text-white hover:text-cyan-300 transition-colors">
-            {isPlaying ? <PauseIcon /> : <PlayIcon />}
-          </button>
-          <div className="flex items-center space-x-2 w-24">
-            <button onClick={toggleMute} className="text-white hover:text-cyan-300 transition-colors">
-              {isMuted || volume === 0 ? <VolumeOffIcon /> : <VolumeUpIcon />}
-            </button>
-            <input 
-              type="range" 
-              min="0" 
-              max="1" 
-              step="0.05" 
-              value={isMuted ? 0 : volume}
-              onChange={handleVolumeChange}
-              className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-cyan-400"
-            />
+      {/* Admin Details Panel */}
+      {showDetails && isAdmin && (
+        <div className="absolute top-12 right-2 bg-black/90 text-white text-xs p-3 rounded shadow-lg max-w-xs">
+          <h4 className="font-bold mb-2">Camera Details</h4>
+          <div className="space-y-1">
+            <p><span className="font-semibold">ID:</span> {camera.id}</p>
+            <p><span className="font-semibold">Name:</span> {camera.name}</p>
+            <p><span className="font-semibold">Status:</span> {isEnabled ? 'Active' : 'Disabled'}</p>
+            <p><span className="font-semibold">Tracked Objects:</span> {trackedObjects.length}</p>
+            <p><span className="font-semibold">Stream URL:</span> {camera.videoStreamUrl}</p>
           </div>
         </div>
-      </div>
+      )}
+
+      {/* Controls Overlay */}
+      {isEnabled && (
+        <div className={`absolute bottom-0 left-0 w-full bg-gradient-to-t from-black/70 to-transparent p-4 transition-opacity duration-300 ${isHovered ? 'opacity-100' : 'opacity-0'}`}>
+          <div className="flex items-center space-x-4">
+            <button onClick={handlePlayPause} className="text-white hover:text-cyan-300 transition-colors">
+              {isPlaying ? <PauseIcon /> : <PlayIcon />}
+            </button>
+            <div className="flex items-center space-x-2 w-24">
+              <button onClick={toggleMute} className="text-white hover:text-cyan-300 transition-colors">
+                {isMuted || volume === 0 ? <VolumeOffIcon /> : <VolumeUpIcon />}
+              </button>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={isMuted ? 0 : volume}
+                onChange={handleVolumeChange}
+                className="w-full h-1 bg-gray-600 rounded-lg appearance-none cursor-pointer accent-cyan-400"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

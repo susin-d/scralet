@@ -6,7 +6,7 @@ interface OverlayBoxProps {
 }
 
 const OverlayBox: React.FC<OverlayBoxProps> = ({ trackedObject }) => {
-  const { bbox, type, id, name, isLoyalMember } = trackedObject;
+  const { bbox, type, id, name, isLoyalMember, confidence } = trackedObject;
   const [x, y, width, height] = bbox;
 
   const boxStyle = {
@@ -31,9 +31,21 @@ const OverlayBox: React.FC<OverlayBoxProps> = ({ trackedObject }) => {
           <span className="flex items-center">
             {isLoyalMember && <span className="mr-1">★</span>}
             {name}
+            {confidence && (
+              <span className="ml-1 text-xs opacity-75">
+                ({Math.round(confidence * 100)}%)
+              </span>
+            )}
           </span>
         ) : (
-          `Human`
+          <span>
+            Human
+            {confidence && (
+              <span className="ml-1 text-xs opacity-75">
+                ({Math.round(confidence * 100)}%)
+              </span>
+            )}
+          </span>
         )}
       </div>
     </div>
