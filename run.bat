@@ -31,7 +31,7 @@ echo Frontend development server started successfully.
 echo.
 
 echo [3/3] Opening application in default browser...
-start http://localhost:3000
+start http://localhost:8054
 echo.
 
 echo All services started successfully!
