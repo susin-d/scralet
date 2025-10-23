@@ -43,7 +43,7 @@ app = FastAPI(title="API Gateway", version="1.0.0")
 websocket_clients: List[WebSocket] = []
 
 # In-memory log storage
-logs: List[LogEntry] = []
+logs: List[Dict[str, Any]] = []
 
 # Pydantic models
 class RegisterRequest(BaseModel):
@@ -120,7 +120,7 @@ async def register(request: RegisterRequest):
             raise HTTPException(status_code=500, detail="Internal server error")
 
 # Dashboard endpoints
-@app.post("/logs", response_model=LogEntry)
+@app.post("/logs")
 async def add_log_entry(log_entry: LogEntry):
     """Add a new log entry and broadcast to WebSocket clients."""
     with REQUEST_LATENCY.labels(method='POST', endpoint='/logs').time():
@@ -129,8 +129,8 @@ async def add_log_entry(log_entry: LogEntry):
             if not log_entry.timestamp:
                 log_entry.timestamp = datetime.utcnow().isoformat()
 
-            # Store the log entry
-            logs.append(log_entry)
+            # Store the log entry as dict
+            logs.append(log_entry.dict())
 
             # Broadcast the new log entry to all connected WebSocket clients
             await broadcast_dashboard_update("new_log", log_entry.dict())
@@ -175,13 +175,13 @@ async def get_cameras():
             logger.error("Error fetching cameras", error=str(e))
             raise HTTPException(status_code=500, detail="Internal server error")
 
-@app.get("/logs", response_model=List[LogEntry])
+@app.get("/logs")
 async def get_logs(limit: int = 50):
     """Get recent event logs."""
     with REQUEST_LATENCY.labels(method='GET', endpoint='/logs').time():
         try:
             # Return logs sorted by timestamp descending (most recent first)
-            sorted_logs = sorted(logs, key=lambda x: x.timestamp, reverse=True)
+            sorted_logs = sorted(logs, key=lambda x: x['timestamp'], reverse=True)
             REQUEST_COUNT.labels(method='GET', endpoint='/logs', status='200').inc()
             return sorted_logs[:limit]
         except Exception as e:

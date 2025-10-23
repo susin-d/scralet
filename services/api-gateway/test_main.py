@@ -15,10 +15,10 @@ def mock_httpx():
     with patch('httpx.AsyncClient') as mock_client:
         mock_instance = MagicMock()
         mock_client.return_value.__aenter__.return_value = mock_instance
-        mock_instance.post = MagicMock()
-        mock_instance.post.return_value = MagicMock()
-        mock_instance.post.return_value.status_code = 200
-        mock_instance.post.return_value.json.return_value = {"message": "Registration successful", "customer_id": "123"}
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"message": "Registration successful", "customer_id": "123"}
+        mock_instance.post = MagicMock(return_value=mock_response)
         yield mock_instance
 
 # Helper function to create a dummy base64 image

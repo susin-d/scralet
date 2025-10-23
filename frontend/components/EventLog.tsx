@@ -15,14 +15,15 @@ const EventLog: React.FC<EventLogProps> = ({ entries }) => {
     const fetchLogs = async () => {
       try {
         const response = await fetch('http://api-gateway:8000/logs?limit=50');
-        if (response.ok) {
-          const logs = await response.json();
-          setFetchedEntries(logs.map((log: any) => ({
-            timestamp: new Date(log.timestamp).toLocaleTimeString('en-US', { hour12: false }),
-            camera: log.camera,
-            message: log.message
-          })));
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
         }
+        const logs = await response.json();
+        setFetchedEntries(logs.map((log: any) => ({
+          timestamp: new Date(log.timestamp).toLocaleTimeString('en-US', { hour12: false }),
+          camera: log.camera,
+          message: log.message
+        })));
       } catch (error) {
         console.error('Failed to fetch logs:', error);
       }
