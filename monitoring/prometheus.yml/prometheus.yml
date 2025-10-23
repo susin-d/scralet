@@ -1,0 +1,58 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+rule_files:
+  # - "first_rules.yml"
+  # - "second_rules.yml"
+
+scrape_configs:
+  # The job name is added as a label `job=<job_name>` to any timeseries scraped from this config.
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'api-gateway'
+    static_configs:
+      - targets: ['api-gateway:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'user-service'
+    static_configs:
+      - targets: ['user-service:8001']
+    metrics_path: '/metrics'
+
+  - job_name: 'face-recognition'
+    static_configs:
+      - targets: ['face-recognition:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'edge-processor'
+    static_configs:
+      - targets: ['edge-processor:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'identity-tracker'
+    static_configs:
+      - targets: ['identity-tracker:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'recommendation'
+    static_configs:
+      - targets: ['recommendation:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'promotions-display-service'
+    static_configs:
+      - targets: ['promotions-display-service:8000']
+    metrics_path: '/metrics'
+
+  - job_name: 'elasticsearch'
+    static_configs:
+      - targets: ['elasticsearch:9200']
+    metrics_path: '/_prometheus/metrics'
+
+  - job_name: 'logstash'
+    static_configs:
+      - targets: ['logstash:9600']
+    metrics_path: '/_node/stats'

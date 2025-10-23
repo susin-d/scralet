@@ -1,0 +1,7 @@
+{
+  "name": "Sentient Supermarket Dashboard",
+  "description": "A real-time dashboard that displays multiple live CCTV feeds with AI-generated data overlays, providing a single pane of glass for monitoring and understanding in-store activity.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
